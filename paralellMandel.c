@@ -1,13 +1,11 @@
-#include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>  // Include this header
+#include <mpi.h>
 
-#define WIDTH 4000
-#define HEIGHT 4000
+#define WIDTH 1000
+#define HEIGHT 1000
 #define MAX_ITER 5000
-#define WORK_TAG 1
-#define SUICIDE_TAG 2
+#define ROWS_PER_CHUNK 10
 
 typedef struct {
     double real;
@@ -32,70 +30,83 @@ void write_to_ppm(int *results, const char *filename) {
     FILE *fp = fopen(filename, "w");
     fprintf(fp, "P3\n%d %d\n255\n", WIDTH, HEIGHT);
     for (int i = 0; i < WIDTH * HEIGHT; i++) {
-        int color = (int)(255 * (results[i] / (float)MAX_ITER));
-        fprintf(fp, "%d %d %d ", color, 0, 255 - color);  // RGB values
+        int count = results[i];
+        int color = (int)(255 * (count / (float)MAX_ITER));
+        fprintf(fp, "%d %d %d ", color, 0, 255 - color);
     }
     fclose(fp);
 }
 
 int main(int argc, char **argv) {
-    int rank, size, i, j, row;
-    MPI_Init(&argc, &argv);
+    int rank, size, provided;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    Complex c;
-    int *results = malloc(WIDTH * HEIGHT * sizeof(int));
-    int *row_data = malloc(WIDTH * sizeof(int));
-
-    if (rank == 0) {  // Master
-        int num_sent = 0;  // Number of rows sent to slaves
-        MPI_Status status;
-
-        // Distribute initial rows of work to each slave
-        for (i = 1; i < size; i++) {
-            MPI_Send(&num_sent, 1, MPI_INT, i, WORK_TAG, MPI_COMM_WORLD);
-            num_sent++;
+    int *results = NULL, *recv_buffer = NULL;
+    if (rank == 0) {
+        results = malloc(WIDTH * HEIGHT * sizeof(int));
+        if (results == NULL) {
+            fprintf(stderr, "Memory allocation failed\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
         }
-
-        // Receive results and distribute remaining work
-        while (num_sent < HEIGHT) {
-            MPI_Recv(row_data, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-            memcpy(results + status.MPI_TAG * WIDTH, row_data, WIDTH * sizeof(int));
-            MPI_Send(&num_sent, 1, MPI_INT, status.MPI_SOURCE, WORK_TAG, MPI_COMM_WORLD);
-            num_sent++;
-        }
-
-        // Receive the final rows of data
-        for (i = 1; i < size; i++) {
-            MPI_Recv(row_data, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-            memcpy(results + status.MPI_TAG * WIDTH, row_data, WIDTH * sizeof(int));
-        }
-
-        // Send termination signal
-        for (i = 1; i < size; i++) {
-            MPI_Send(0, 0, MPI_INT, i, SUICIDE_TAG, MPI_COMM_WORLD);
-        }
-
-        // Write results to file
-        write_to_ppm(results, "output.ppm");
-    } else {  // Slaves
-        MPI_Status status;
-        while (1) {
-            MPI_Recv(&row, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-            if (status.MPI_TAG == SUICIDE_TAG) break;
-
-            for (j = 0; j < WIDTH; j++) {
-                c.real = -2.0 + j * 3.0 / WIDTH;
-                c.imag = -1.5 + row * 3.0 / HEIGHT;
-                row_data[j] = mandelbrot(c);
-            }
-            MPI_Send(row_data, WIDTH, MPI_INT, 0, row, MPI_COMM_WORLD);
+    } else {
+        recv_buffer = malloc(WIDTH * ROWS_PER_CHUNK * sizeof(int));
+        if (recv_buffer == NULL) {
+            fprintf(stderr, "Memory allocation failed\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
 
-    free(results);
-    free(row_data);
+    int rows_remaining = HEIGHT;
+    MPI_Status status;
+    int request, start_row;
+    int num_active_slaves = size - 1; 
+
+    while (1) {
+        if (rank == 0) {
+            while (rows_remaining > 0 || num_active_slaves > 0) {
+                MPI_Recv(&request, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                if (rows_remaining > 0) {
+                    int rows_to_send = (rows_remaining < ROWS_PER_CHUNK) ? rows_remaining : ROWS_PER_CHUNK;
+                    start_row = HEIGHT - rows_remaining;
+                    rows_remaining -= rows_to_send;
+                    MPI_Send(&start_row, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+                    MPI_Send(&rows_to_send, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+                    MPI_Recv(results + start_row * WIDTH, rows_to_send * WIDTH, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD, &status);
+                } else {
+                    int stop_signal = -1;
+                    MPI_Send(&stop_signal, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+                    num_active_slaves--;
+                }
+            }
+            break;
+        } else {
+            int rows_count;
+            MPI_Send(&request, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+            MPI_Recv(&start_row, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            if (start_row == -1) break;
+            MPI_Recv(&rows_count, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            for (int i = 0; i < rows_count; i++) {
+                for (int j = 0; j < WIDTH; j++) {
+                    Complex c;
+                    c.real = -2.0 + j * 3.0 / WIDTH;
+                    c.imag = -1.5 + (start_row + i) * 3.0 / HEIGHT;
+                    recv_buffer[i * WIDTH + j] = mandelbrot(c);
+                }
+            }
+            //printf("Process %d sending/receiving data...\n", rank);
+            MPI_Send(recv_buffer, rows_count * WIDTH, MPI_INT, 0, 0, MPI_COMM_WORLD);
+        }
+    }
+
+    if (rank == 0) {
+        write_to_ppm(results, "output.ppm");
+        free(results);
+    } else {
+        free(recv_buffer);
+    }
+
     MPI_Finalize();
     return 0;
 }
