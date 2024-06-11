@@ -1,14 +1,13 @@
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <string.h>  // Include this header
 
-#define WIDTH 8000
-#define HEIGHT 8000
-#define MAX_ITER 10000
-#define WORK_REQUEST 1
-#define WORK_RESPONSE 2
-#define SUICIDE_TAG 3
+#define WIDTH 4000
+#define HEIGHT 4000
+#define MAX_ITER 5000
+#define WORK_TAG 1
+#define SUICIDE_TAG 2
 
 typedef struct {
     double real;
@@ -34,13 +33,13 @@ void write_to_ppm(int *results, const char *filename) {
     fprintf(fp, "P3\n%d %d\n255\n", WIDTH, HEIGHT);
     for (int i = 0; i < WIDTH * HEIGHT; i++) {
         int color = (int)(255 * (results[i] / (float)MAX_ITER));
-        fprintf(fp, "%d %d %d ", color, 0, 255 - color);
+        fprintf(fp, "%d %d %d ", color, 0, 255 - color);  // RGB values
     }
     fclose(fp);
 }
 
 int main(int argc, char **argv) {
-    int rank, size;
+    int rank, size, i, j, row;
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -49,39 +48,42 @@ int main(int argc, char **argv) {
     int *results = malloc(WIDTH * HEIGHT * sizeof(int));
     int *row_data = malloc(WIDTH * sizeof(int));
 
-    if (rank == 0) {  // Mestre
-        int num_sent = 0, num_received = 0, requester, row;
+    if (rank == 0) {  // Master
+        int num_sent = 0;  // Number of rows sent to slaves
         MPI_Status status;
 
-        while (num_received < HEIGHT) {
-            if (num_sent < HEIGHT) {
-                MPI_Recv(&requester, 1, MPI_INT, MPI_ANY_SOURCE, WORK_REQUEST, MPI_COMM_WORLD, &status);
-                row = num_sent++;
-                MPI_Send(&row, 1, MPI_INT, requester, WORK_RESPONSE, MPI_COMM_WORLD);
-            }
-
-            if (num_received < num_sent) {
-                MPI_Recv(row_data, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                memcpy(results + status.MPI_TAG * WIDTH, row_data, WIDTH * sizeof(int));
-                num_received++;
-            }
+        // Distribute initial rows of work to each slave
+        for (i = 1; i < size; i++) {
+            MPI_Send(&num_sent, 1, MPI_INT, i, WORK_TAG, MPI_COMM_WORLD);
+            num_sent++;
         }
 
-        // Envio do sinal de finalizacao
-        for (int i = 1; i < size; i++) {
-            row = -1;  // Sinal de finalizacao
-            MPI_Send(&row, 1, MPI_INT, i, SUICIDE_TAG, MPI_COMM_WORLD);
+        // Receive results and distribute remaining work
+        while (num_sent < HEIGHT) {
+            MPI_Recv(row_data, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            memcpy(results + status.MPI_TAG * WIDTH, row_data, WIDTH * sizeof(int));
+            MPI_Send(&num_sent, 1, MPI_INT, status.MPI_SOURCE, WORK_TAG, MPI_COMM_WORLD);
+            num_sent++;
         }
 
+        // Receive the final rows of data
+        for (i = 1; i < size; i++) {
+            MPI_Recv(row_data, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            memcpy(results + status.MPI_TAG * WIDTH, row_data, WIDTH * sizeof(int));
+        }
+
+        // Send termination signal
+        for (i = 1; i < size; i++) {
+            MPI_Send(0, 0, MPI_INT, i, SUICIDE_TAG, MPI_COMM_WORLD);
+        }
+
+        // Write results to file
         write_to_ppm(results, "output.ppm");
-    } else {  // Escravos
-        int row, j;
+    } else {  // Slaves
         MPI_Status status;
-
         while (1) {
-            MPI_Send(&rank, 1, MPI_INT, 0, WORK_REQUEST, MPI_COMM_WORLD);
             MPI_Recv(&row, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-            if (status.MPI_TAG == SUICIDE_TAG || row == -1) break;
+            if (status.MPI_TAG == SUICIDE_TAG) break;
 
             for (j = 0; j < WIDTH; j++) {
                 c.real = -2.0 + j * 3.0 / WIDTH;
