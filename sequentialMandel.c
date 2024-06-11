@@ -1,15 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define WIDTH 8000
-#define HEIGHT 8000
-#define MAX_ITER 10000
+#define WIDTH 2000
+#define HEIGHT 2000
+#define MAX_ITER 5000
 
+// definicao de um número complexo
 typedef struct {
     double real;
     double imag;
 } Complex;
 
+// funcao que determina se um ponto pertence ao conjunto de Mandelbrot
 int mandelbrot(Complex c) {
     int count = 0;
     Complex z = {0, 0};
@@ -24,6 +26,7 @@ int mandelbrot(Complex c) {
     return count;
 }
 
+// escreve os resultados no PPM
 void write_to_ppm(int *results, const char *filename) {
     FILE *fp = fopen(filename, "w");
     fprintf(fp, "P3\n%d %d\n255\n", WIDTH, HEIGHT);
@@ -34,7 +37,7 @@ void write_to_ppm(int *results, const char *filename) {
     }
     fclose(fp);
 }
-
+//  principal sequencial
 int main() {
     Complex c;
     int *results = malloc(WIDTH * HEIGHT * sizeof(int));

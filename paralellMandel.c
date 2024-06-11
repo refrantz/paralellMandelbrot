@@ -7,11 +7,14 @@
 #define MAX_ITER 5000
 #define ROWS_PER_CHUNK 10
 
+
+// definicao de um número complexo
 typedef struct {
     double real;
     double imag;
 } Complex;
 
+// funcao que determina se um ponto pertence ao conjunto de Mandelbrot
 int mandelbrot(Complex c) {
     int count = 0;
     Complex z = {0, 0};
@@ -26,6 +29,7 @@ int mandelbrot(Complex c) {
     return count;
 }
 
+// escreve os resultados no PPM
 void write_to_ppm(int *results, const char *filename) {
     FILE *fp = fopen(filename, "w");
     fprintf(fp, "P3\n%d %d\n255\n", WIDTH, HEIGHT);
@@ -37,6 +41,7 @@ void write_to_ppm(int *results, const char *filename) {
     fclose(fp);
 }
 
+//  principal MPI
 int main(int argc, char **argv) {
     int rank, size, provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
@@ -46,6 +51,7 @@ int main(int argc, char **argv) {
     int *results = NULL, *recv_buffer = NULL;
     MPI_Request *recv_requests = NULL;
     MPI_Status *recv_statuses = NULL;
+    //aloca memoria para resultado final no mestre
     if (rank == 0) {
         results = malloc(WIDTH * HEIGHT * sizeof(int));
         recv_requests = malloc((size - 1) * sizeof(MPI_Request));
@@ -54,6 +60,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Alocacao de memoria falhou\n");
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
+    //aloca memoria para chunks a serem calculados pelos escravos
     } else {
         recv_buffer = malloc(WIDTH * ROWS_PER_CHUNK * sizeof(int));
         if (recv_buffer == NULL) {
@@ -70,6 +77,7 @@ int main(int argc, char **argv) {
     while (1) {
         if (rank == 0) {
             while (rows_remaining > 0 || num_active_slaves > 0) {
+                //espera pedido de trabalho do escravo
                 MPI_Recv(&request, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
                 if (rows_remaining > 0) {
                     int rows_to_send = (rows_remaining < ROWS_PER_CHUNK) ? rows_remaining : ROWS_PER_CHUNK;
@@ -103,6 +111,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    //mestre escreve os resultados e libera memoria antes de finalizar
     if (rank == 0) {
         write_to_ppm(results, "output.ppm");
         free(results);
